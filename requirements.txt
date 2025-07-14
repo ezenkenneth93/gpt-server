@@ -1,7 +1,10 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pydantic
 langchain
 langchain-community
 openai
 python-dotenv
+uvloop
+httptools
+redis
