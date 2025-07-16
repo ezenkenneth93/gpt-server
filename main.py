@@ -10,10 +10,17 @@ from dotenv import load_dotenv
 import os
 import json
 import asyncio
+
+from asyncio import create_task
+import queue  # 🔧 thread-safe queue 추가
 from typing import Any, Dict, List
+
+# 원래 상태로 복원
 
 # 🔐 환경변수에서 OpenAI API 키 로드
 load_dotenv()
+
+# 🔧 OPTION 4: 연결 풀링은 일단 제거 (호환성 문제)
 
 # 🔧 FastAPI 앱 초기화
 app = FastAPI()
@@ -27,24 +34,41 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 🔧 스트리밍을 위한 커스텀 콜백 핸들러
-class StreamingCallbackHandler(BaseCallbackHandler):
-    def __init__(self):
-        self.tokens = []
-        self.finished = False
+# 🔧 스트리밍을 위한 커스텀 콜백 핸들러 (백업용 - 기존 가짜 스트리밍)
+# class StreamingCallbackHandler(BaseCallbackHandler):
+#     def __init__(self):
+#         self.tokens = []
+#         self.finished = False
+
+#     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
+#         self.tokens.append(token)
+
+#     def on_llm_end(self, response, **kwargs: Any) -> None:
+#         self.finished = True
+
+# 🚀 진짜 실시간 스트리밍을 위한 비동기 큐 콜백 핸들러
+class AsyncQueueCallbackHandler(BaseCallbackHandler):
+    def __init__(self, queue: queue.Queue):
+        self.queue = queue
+        self.loop = asyncio.get_event_loop()  # 메인 루프 저장
 
     def on_llm_new_token(self, token: str, **kwargs: Any) -> None:
-        self.tokens.append(token)
+        # 메인 루프에 코루틴 안전하게 스레드에서 실행
+        asyncio.run_coroutine_threadsafe(self.queue.put(token), self.loop)
 
     def on_llm_end(self, response, **kwargs: Any) -> None:
-        self.finished = True
+        asyncio.run_coroutine_threadsafe(self.queue.put(None), self.loop)
+
 
 # 🔧 모델 설정
-llm = ChatOpenAI(model="gpt-4", temperature=0.7)
+llm = ChatOpenAI(
+    model="gpt-4o", 
+    temperature=0.7
+)
 
-# 🔧 스트리밍용 모델 설정
+# 🔧 스트리밍용 모델 설정 (전역 인스턴스 - 재사용)
 streaming_llm = ChatOpenAI(
-    model="gpt-4", 
+    model="gpt-4o", 
     temperature=0.7,
     streaming=True
 )
@@ -62,6 +86,7 @@ GPT의 역할은 다음과 같습니다:
    (질문은 선택 항목이므로, 입력이 없으면 생략하세요.)
 5. 잘못된 부분을 고쳐주는것과 아이와 함께 쓸 수 있는 영어표현 3가지에 대해서 항상 그 뜻도 자세히 설명해주세요.
 # 6. 가장 마지막에는 항상 잘 하고있다는, 혹은 다른 표현의 응원의 말로 마지막을 장식해주세요. 좀 부드럽게 응원해주세요.
+7. 응답을 출력하는 에디터는 마크업, 마크다운이 아니므로 강조할 떄 ** 를 사용하지 말아주세요.
 아래는 사용자가 입력한 내용입니다:
 
 문장: "{english_essay}"
@@ -80,6 +105,22 @@ GPT의 역할은 다음과 같습니다:
 """)
 
 feedback_chain = LLMChain(llm=llm, prompt=full_prompt)
+
+# 🚀 OPTION 9: Pre-warming (예열) - 앱 시작 시 연결 미리 준비
+@app.on_event("startup")
+async def startup_event():
+    try:
+        print("🔥 Pre-warming: OpenAI 연결 준비 중...")
+        # 더미 요청으로 연결 예열
+        dummy_response = llm.invoke("Hello")
+        print("✅ Pre-warming 완료: OpenAI 연결 준비됨!")
+    except Exception as e:
+        print(f"⚠️ Pre-warming 실패 (정상 동작에는 영향 없음): {e}")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    print("🔄 앱 종료 중...")
+    print("✅ 정리 완료!")
 
 # ✅ 입력 및 출력 데이터 모델 정의
 class FeedbackRequest(BaseModel):
@@ -103,46 +144,54 @@ async def generate_feedback(data: FeedbackRequest):
 async def stream_feedback(data: FeedbackRequest):
     async def generate():
         try:
-            # 시작 메시지
-            yield f"data: {json.dumps({'status': 'starting', 'message': 'AI 피드백 생성을 시작합니다...'}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.1)
+            # 🚀 OPTION 10: 즉시 응답 시작 - 연결 확인 메시지부터 전송
+            yield f"data: {json.dumps({'status': 'connected', 'message': '연결 완료! 피드백 생성 준비 중...'}, ensure_ascii=False)}\n\n"
             
             # 스트리밍 콜백 핸들러 생성
-            callback_handler = StreamingCallbackHandler()
+            # callback_handler = StreamingCallbackHandler() # 기존 가짜 스트리밍 핸들러
+            queue_instance = queue.Queue()  # 진짜 실시간 스트리밍 큐 (thread-safe)
+            callback_handler = AsyncQueueCallbackHandler(queue_instance)
             
-            # 스트리밍용 LLM 체인 생성
+            # 🚀 콜백이 포함된 스트리밍 LLM 생성 (요청마다 새로 생성, 콜백 포함)
+            streaming_llm_with_callback = ChatOpenAI(
+                model="gpt-4o", 
+                temperature=0.7,
+                streaming=True,
+                callbacks=[callback_handler]  # ChatOpenAI 레벨에서 콜백 설정
+            )
+            
+            # 설정 완료 메시지
+            yield f"data: {json.dumps({'status': 'ready', 'message': '설정 완료! AI 분석 시작...'}, ensure_ascii=False)}\n\n"
+            
+            # 🚀 스트리밍용 LLM 체인 생성
             streaming_chain = LLMChain(
-                llm=ChatOpenAI(
-                    model="gpt-4", 
-                    temperature=0.7,
-                    streaming=True,
-                    callbacks=[callback_handler]
-                ), 
+                llm=streaming_llm_with_callback,  # 콜백이 포함된 인스턴스 사용
                 prompt=full_prompt
             )
             
             # 진행 상태 메시지
-            yield f"data: {json.dumps({'status': 'processing', 'message': 'GPT-4가 피드백을 생성하고 있습니다...'}, ensure_ascii=False)}\n\n"
-            await asyncio.sleep(0.1)
+            yield f"data: {json.dumps({'status': 'processing', 'message': 'GPT-4 Turbo가 피드백을 생성하고 있습니다...'}, ensure_ascii=False)}\n\n"
             
-            # 피드백 생성 시작
-            response = await asyncio.to_thread(
-                streaming_chain.invoke,
-                {
-                    "english_essay": data.english_essay,
-                    "question": data.question
-                }
-            )
+            # 🚀 진짜 실시간 스트리밍: LLM 체인을 별도 태스크에서 실행
+            async def run_chain():
+                await asyncio.to_thread(
+                    streaming_chain.invoke,
+                    {
+                        "english_essay": data.english_essay,
+                        "question": data.question
+                    }
+                )
             
-            # 전체 응답을 청크 단위로 전송
-            full_text = response["text"]
-            chunk_size = 100  # 한 번에 보낼 문자 수
+            # 체인 실행 시작
+            chain_task = asyncio.create_task(run_chain())
             
-            for i in range(0, len(full_text), chunk_size):
-                chunk = full_text[i:i + chunk_size]
-                chunk_data = json.dumps({"content": chunk}, ensure_ascii=False)
-                yield f"data: {chunk_data}\n\n"
-                await asyncio.sleep(0.05)  # 약간의 지연으로 스트리밍 효과
+            # 🚀 토큰 스트리밍: 큐에서 토큰을 받는 즉시 바로 전송
+            while True:
+                # thread-safe queue에서 non-blocking으로 가져오기
+                token = await asyncio.to_thread(queue_instance.get)  # thread-safe 큐이므로 to_thread 사용
+                if token is None:  # 종료 신호
+                    break
+                yield f"data: {json.dumps({'content': token}, ensure_ascii=False)}\n\n"
             
             # 완료 메시지
             yield f"data: {json.dumps({'done': True, 'message': '피드백 생성이 완료되었습니다.'}, ensure_ascii=False)}\n\n"
