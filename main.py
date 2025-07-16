@@ -12,7 +12,7 @@ import json
 import asyncio
 
 from asyncio import create_task
-import queue  # 🔧 thread-safe queue 추가
+from asyncio import Queue   
 from typing import Any, Dict, List
 
 # 원래 상태로 복원
@@ -48,7 +48,7 @@ app.add_middleware(
 
 # 🚀 진짜 실시간 스트리밍을 위한 비동기 큐 콜백 핸들러
 class AsyncQueueCallbackHandler(BaseCallbackHandler):
-    def __init__(self, queue: queue.Queue):
+    def __init__(self, queue: Queue):
         self.queue = queue
         self.loop = asyncio.get_event_loop()  # 메인 루프 저장
 
@@ -149,7 +149,7 @@ async def stream_feedback(data: FeedbackRequest):
             
             # 스트리밍 콜백 핸들러 생성
             # callback_handler = StreamingCallbackHandler() # 기존 가짜 스트리밍 핸들러
-            queue_instance = queue.Queue()  # 진짜 실시간 스트리밍 큐 (thread-safe)
+            queue_instance = Queue()   # 진짜 실시간 스트리밍 큐 (thread-safe)
             callback_handler = AsyncQueueCallbackHandler(queue_instance)
             
             # 🚀 콜백이 포함된 스트리밍 LLM 생성 (요청마다 새로 생성, 콜백 포함)
@@ -188,7 +188,7 @@ async def stream_feedback(data: FeedbackRequest):
             # 🚀 토큰 스트리밍: 큐에서 토큰을 받는 즉시 바로 전송
             while True:
                 # thread-safe queue에서 non-blocking으로 가져오기
-                token = await asyncio.to_thread(queue_instance.get)  # thread-safe 큐이므로 to_thread 사용
+                token = await queue_instance.get()
                 if token is None:  # 종료 신호
                     break
                 yield f"data: {json.dumps({'content': token}, ensure_ascii=False)}\n\n"
