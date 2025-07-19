@@ -154,7 +154,7 @@ async def stream_feedback(data: FeedbackRequest):
             
             # 🚀 콜백이 포함된 스트리밍 LLM 생성 (요청마다 새로 생성, 콜백 포함)
             streaming_llm_with_callback = ChatOpenAI(
-                model="gpt-4o", 
+                model="gpt-4o-mini", 
                 temperature=0.7,
                 streaming=True,
                 callbacks=[callback_handler]  # ChatOpenAI 레벨에서 콜백 설정
