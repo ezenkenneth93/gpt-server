@@ -113,7 +113,7 @@ async def startup_event():
         print("🔥 Pre-warming: OpenAI 연결 준비 중...")
         # 더미 요청으로 연결 예열
         dummy_response = llm.invoke("Hello")
-        print("✅ Pre-warming 완료: OpenAI 연결 준비됨!")
+        print("✅ Pre-warming 완료: OpenAI 연결 준비됨! 사용된 모델: gpt-4o-mini")
     except Exception as e:
         print(f"⚠️ Pre-warming 실패 (정상 동작에는 영향 없음): {e}")
 
